@@ -1,0 +1,59 @@
+{
+  "name": "cdrmmo-desktop",
+  "version": "1.0.1",
+  "description": "CDRRMO Desktop Application",
+  "main": "electron/main.js",
+  "author": "Rubin",
+  "private": true,
+  "scripts": {
+    "frontend-install": "npm install --prefix frontend",
+    "frontend-start": "npm start --prefix frontend",
+    "frontend-build": "npm run build --prefix frontend",
+    "electron": "wait-on http://localhost:3000 && electron .",
+    "dev": "concurrently \"npm run frontend-start\" \"npm run electron\"",
+    "dist": "npm run frontend-build && electron-builder",
+    "dist:win": "npm run frontend-build && electron-builder --win",
+    "dist:portable": "npm run frontend-build && electron-builder --win portable"
+  },
+  "devDependencies": {
+    "concurrently": "^9.0.1",
+    "electron": "^37.2.1",
+    "electron-builder": "^26.0.12",
+    "wait-on": "^8.0.5"
+  },
+  "build": {
+    "appId": "com.cdrmmo.desktop",
+    "productName": "CDRRMO Inventory Management System",
+    "directories": {
+      "output": "release",
+      "buildResources": "electron"
+    },
+    "files": [
+      "electron/**/*",
+      "frontend/build/**/*",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "dist/inventory_backend",
+        "to": "backend/inventory_backend"
+      }
+    ],
+    "extraMetadata": {
+      "main": "electron/main.js"
+    },
+    "win": {
+      "target": [
+        "nsis"
+      ],
+      "icon": "electron/icon.ico"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "CDRRMO Inventory Management System"
+    }
+  }
+}
