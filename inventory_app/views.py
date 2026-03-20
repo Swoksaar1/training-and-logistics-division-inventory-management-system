@@ -32,6 +32,7 @@ def normalize_transaction_filter(value):
         return None
 
     raw = str(value).strip().upper().replace(" ", "_")
+    mapping = {
         "IN": "IN",
         "STOCK_IN": "IN",
         "OUT": "OUT",
