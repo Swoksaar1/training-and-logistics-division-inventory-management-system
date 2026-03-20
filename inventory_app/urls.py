@@ -8,7 +8,7 @@ from .views import (
     monthly_summary,
     stock_card,
     me,
-    change_password,  # ✅ add this
+    change_password,
 )
 
 router = DefaultRouter()
@@ -18,11 +18,11 @@ router.register(r"transactions", StockTransactionViewSet, basename="transactions
 urlpatterns = [
     path("", include(router.urls)),
 
-    # ✅ auth endpoints
+    # Auth endpoints
     path("auth/me/", me, name="auth-me"),
     path("auth/change-password/", change_password, name="change-password"),
 
-    # Custom report/dashboard endpoints
+    # Dashboard / Reports endpoints
     path("dashboard-summary/", dashboard_summary, name="dashboard-summary"),
     path("reports/monthly-summary/", monthly_summary, name="monthly-summary"),
     path("reports/stock-card/<int:item_id>/", stock_card, name="stock-card"),

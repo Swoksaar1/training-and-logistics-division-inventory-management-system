@@ -2,11 +2,48 @@ from rest_framework import serializers
 from .models import Item, StockTransaction
 
 
+def normalize_category(value):
+    if value in [None, ""]:
+        return value
+
+    raw = str(value).strip().upper().replace(" ", "_")
+
+    category_map = {
+        "OFFICE_SUPPLY": "OFFICE_SUPPLY",
+        "OFFICE_SUPPLY_INVENTORY": "OFFICE_SUPPLY",
+        "JANITORIAL": "JANITORIAL",
+        "JANITORIAL_INVENTORY": "JANITORIAL",
+        "EQUIPMENT": "EQUIPMENT",
+        "EQUIPMENT_INVENTORY": "EQUIPMENT",
+    }
+
+    return category_map.get(raw)
+
+
+def normalize_condition(value):
+    if value in [None, ""]:
+        return None
+
+    raw = str(value).strip().upper().replace(" ", "_")
+
+    condition_map = {
+        "GOOD": "GOOD",
+        "IN_GOOD_CONDITION": "GOOD",
+        "GOOD_CONDITION": "GOOD",
+        "DAMAGED": "DAMAGED",
+        "DAMAGE": "DAMAGED",
+        "LOST": "LOST",
+    }
+
+    return condition_map.get(raw)
+
+
 class ItemSerializer(serializers.ModelSerializer):
     stock_status = serializers.SerializerMethodField()
     inventory_type = serializers.SerializerMethodField()
     stock = serializers.IntegerField(source="current_stock", read_only=True)
     name = serializers.CharField(source="item_name", read_only=True)
+    condition_label = serializers.SerializerMethodField()
 
     class Meta:
         model = Item
@@ -23,6 +60,9 @@ class ItemSerializer(serializers.ModelSerializer):
             "stock",
             "min_stock",
             "stock_status",
+            "life_span",
+            "condition_status",
+            "condition_label",
             "created_at",
             "updated_at",
         ]
@@ -38,27 +78,27 @@ class ItemSerializer(serializers.ModelSerializer):
     def get_inventory_type(self, obj):
         return obj.get_category_display()
 
+    def get_condition_label(self, obj):
+        return obj.get_condition_status_display() if obj.condition_status else "-"
+
     def validate_category(self, value):
-        if not value:
-            raise serializers.ValidationError("Category is required.")
+        normalized = normalize_category(value)
+        if not normalized:
+            raise serializers.ValidationError(
+                "Invalid category. Use OFFICE_SUPPLY, JANITORIAL, or EQUIPMENT."
+            )
+        return normalized
 
-        normalized = str(value).strip().upper().replace(" ", "_")
+    def validate_condition_status(self, value):
+        if value in [None, ""]:
+            return None
 
-        category_map = {
-            "OFFICE_SUPPLY": "OFFICE_SUPPLY",
-            "OFFICE_SUPPLY_INVENTORY": "OFFICE_SUPPLY",
-            "JANITORIAL": "JANITORIAL",
-            "JANITORIAL_INVENTORY": "JANITORIAL",
-            "EQUIPMENT": "EQUIPMENT",
-            "EQUIPMENT_INVENTORY": "EQUIPMENT",
-        }
-
-        if normalized in category_map:
-            return category_map[normalized]
-
-        raise serializers.ValidationError(
-            "Invalid category. Use OFFICE_SUPPLY, JANITORIAL, or EQUIPMENT."
-        )
+        normalized = normalize_condition(value)
+        if not normalized:
+            raise serializers.ValidationError(
+                "Invalid condition status. Use GOOD, DAMAGED, or LOST."
+            )
+        return normalized
 
     def validate_current_stock(self, value):
         if value is None:
@@ -86,6 +126,18 @@ class ItemSerializer(serializers.ModelSerializer):
         if "stock" in data and "current_stock" not in data:
             data["current_stock"] = data.get("stock")
 
+        if "status" in data and "condition_status" not in data:
+            data["condition_status"] = data.get("status")
+
+        if "item_status" in data and "condition_status" not in data:
+            data["condition_status"] = data.get("item_status")
+
+        if "lifeSpan" in data and "life_span" not in data:
+            data["life_span"] = data.get("lifeSpan")
+
+        if "lifespan" in data and "life_span" not in data:
+            data["life_span"] = data.get("lifespan")
+
         if data.get("current_stock") in ["", None]:
             data["current_stock"] = 0
 
@@ -100,6 +152,8 @@ class StockTransactionSerializer(serializers.ModelSerializer):
     item_code = serializers.CharField(source="item.item_code", read_only=True)
     unit = serializers.CharField(source="item.unit", read_only=True)
     category = serializers.CharField(source="item.get_category_display", read_only=True)
+    type_label = serializers.SerializerMethodField()
+    return_condition_label = serializers.SerializerMethodField()
 
     notes = serializers.CharField(write_only=True, required=False, allow_blank=True)
     released_by = serializers.CharField(write_only=True, required=False, allow_blank=True)
@@ -115,6 +169,7 @@ class StockTransactionSerializer(serializers.ModelSerializer):
             "category",
             "unit",
             "transaction_type",
+            "type_label",
             "date",
             "quantity",
             "supplier",
@@ -126,9 +181,51 @@ class StockTransactionSerializer(serializers.ModelSerializer):
             "notes",
             "released_by",
             "received_by",
+            "inventory_custodian_slip",
+            "material_requisition",
+            "property_return_slip_date",
+            "return_condition_status",
+            "return_condition_label",
+            "life_span",
             "created_at",
         ]
         read_only_fields = ["created_at"]
+
+    def get_type_label(self, obj):
+        return obj.get_transaction_type_display()
+
+    def get_return_condition_label(self, obj):
+        return obj.get_return_condition_status_display() if obj.return_condition_status else "-"
+
+    def validate_transaction_type(self, value):
+        if value in [None, ""]:
+            raise serializers.ValidationError("Transaction type is required.")
+
+        raw = str(value).strip().upper().replace(" ", "_")
+
+        mapping = {
+            "IN": "IN",
+            "STOCK_IN": "IN",
+            "OUT": "OUT",
+            "STOCK_OUT": "OUT",
+            "BROUGHT_BACK": "BROUGHT_BACK",
+            "BACK": "BROUGHT_BACK",
+            "RETURN": "BROUGHT_BACK",
+        }
+
+        normalized = mapping.get(raw)
+        if not normalized:
+            raise serializers.ValidationError("Transaction type must be IN, OUT, or BROUGHT_BACK.")
+        return normalized
+
+    def validate_return_condition_status(self, value):
+        if value in [None, ""]:
+            return None
+
+        normalized = normalize_condition(value)
+        if not normalized:
+            raise serializers.ValidationError("Invalid return condition status.")
+        return normalized
 
     def validate(self, data):
         transaction_type = data.get("transaction_type")
@@ -140,17 +237,43 @@ class StockTransactionSerializer(serializers.ModelSerializer):
                 {"quantity": "Quantity must be greater than 0."}
             )
 
-        if transaction_type not in ["IN", "OUT"]:
-            raise serializers.ValidationError(
-                {"transaction_type": "Transaction type must be IN or OUT."}
-            )
-
         if transaction_type == "OUT" and item and quantity > item.current_stock:
             raise serializers.ValidationError(
                 {"quantity": "Not enough stock available."}
             )
 
+        if transaction_type == "BROUGHT_BACK" and item and item.category != "EQUIPMENT":
+            raise serializers.ValidationError(
+                {"item": "Brought back is only for equipment items."}
+            )
+
         return data
+
+    def to_internal_value(self, data):
+        data = data.copy()
+
+        if "type" in data and "transaction_type" not in data:
+            data["transaction_type"] = data.get("type")
+
+        if "status" in data and "return_condition_status" not in data:
+            data["return_condition_status"] = data.get("status")
+
+        if "prs_date" in data and "property_return_slip_date" not in data:
+            data["property_return_slip_date"] = data.get("prs_date")
+
+        if "prsDate" in data and "property_return_slip_date" not in data:
+            data["property_return_slip_date"] = data.get("prsDate")
+
+        if "ics" in data and "inventory_custodian_slip" not in data:
+            data["inventory_custodian_slip"] = data.get("ics")
+
+        if "mr" in data and "material_requisition" not in data:
+            data["material_requisition"] = data.get("mr")
+
+        if "lifeSpan" in data and "life_span" not in data:
+            data["life_span"] = data.get("lifeSpan")
+
+        return super().to_internal_value(data)
 
     def create(self, validated_data):
         notes = validated_data.pop("notes", None)
