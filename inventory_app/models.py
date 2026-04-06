@@ -1,4 +1,4 @@
-from django.db import models
+from django.db import models, transaction
 from django.core.exceptions import ValidationError
 from django.contrib.auth.models import User
 from django.db.models.signals import post_save
@@ -22,11 +22,10 @@ class Item(models.Model):
     item_name = models.CharField(max_length=150, unique=True)
     description = models.TextField(blank=True, null=True)
     category = models.CharField(max_length=30, choices=CATEGORY_CHOICES)
-    unit = models.CharField(max_length=30)  # pcs, ream, box, unit
+    unit = models.CharField(max_length=30)
     current_stock = models.PositiveIntegerField(default=0)
     min_stock = models.PositiveIntegerField(default=0)
 
-    # Added so your Items page and Equipment dashboard can work
     life_span = models.CharField(max_length=100, blank=True, null=True)
     condition_status = models.CharField(
         max_length=20,
@@ -34,6 +33,9 @@ class Item(models.Model):
         blank=True,
         null=True,
     )
+
+    inventory_custodian_slip = models.CharField(max_length=150, blank=True, null=True)
+    material_receipt = models.CharField(max_length=150, blank=True, null=True)
 
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -46,6 +48,12 @@ class Item(models.Model):
         return "IN_STOCK"
 
     def save(self, *args, **kwargs):
+        if self.category != "EQUIPMENT":
+            self.life_span = None
+            self.condition_status = None
+            self.inventory_custodian_slip = None
+            self.material_receipt = None
+
         if not self.item_code:
             if self.category == "OFFICE_SUPPLY":
                 prefix = "OS"
@@ -100,19 +108,15 @@ class StockTransaction(models.Model):
     date = models.DateField()
     quantity = models.PositiveIntegerField()
 
-    # Stock IN fields
     supplier = models.CharField(max_length=150, blank=True, null=True)
 
-    # Stock OUT fields
     requested_by = models.CharField(max_length=150, blank=True, null=True)
     approved_by = models.CharField(max_length=150, blank=True, null=True)
     department = models.CharField(max_length=150, blank=True, null=True)
 
-    # Shared fields
     reference_no = models.CharField(max_length=100, blank=True, null=True)
     remarks = models.TextField(blank=True, null=True)
 
-    # Brought Back fields
     inventory_custodian_slip = models.CharField(max_length=150, blank=True, null=True)
     material_requisition = models.CharField(max_length=150, blank=True, null=True)
     property_return_slip_date = models.DateField(blank=True, null=True)
@@ -133,52 +137,27 @@ class StockTransaction(models.Model):
         if self.transaction_type not in ["IN", "OUT", "BROUGHT_BACK"]:
             raise ValidationError("Transaction type must be IN, OUT, or BROUGHT_BACK.")
 
-        if self.transaction_type == "OUT" and self.item_id:
-            if self.pk is None and self.quantity > self.item.current_stock:
-                raise ValidationError("Not enough stock available for stock out.")
-
         if self.transaction_type == "BROUGHT_BACK" and self.item_id:
             if self.item.category != "EQUIPMENT":
-                raise ValidationError("Brought back transactions are only allowed for equipment items.")
+                raise ValidationError(
+                    "Brought back transactions are only allowed for equipment items."
+                )
 
     def save(self, *args, **kwargs):
-        is_new = self.pk is None
         self.full_clean()
-
-        if is_new:
-            if self.transaction_type == "IN":
-                self.item.current_stock += self.quantity
-
-            elif self.transaction_type == "OUT":
-                if self.quantity > self.item.current_stock:
-                    raise ValidationError("Not enough stock available for stock out.")
-                self.item.current_stock -= self.quantity
-
-            elif self.transaction_type == "BROUGHT_BACK":
-                self.item.current_stock += self.quantity
-
-                if self.return_condition_status:
-                    self.item.condition_status = self.return_condition_status
-
-                if self.life_span:
-                    self.item.life_span = self.life_span
-
-            self.item.save()
-
         super().save(*args, **kwargs)
 
     def delete(self, *args, **kwargs):
-        if self.transaction_type == "IN":
-            self.item.current_stock = max(0, self.item.current_stock - self.quantity)
+        with transaction.atomic():
+            item = Item.objects.select_for_update().get(pk=self.item_id)
 
-        elif self.transaction_type == "OUT":
-            self.item.current_stock += self.quantity
+            if self.transaction_type == "OUT":
+                item.current_stock += self.quantity
+            elif self.transaction_type in ["IN", "BROUGHT_BACK"]:
+                item.current_stock = max(0, item.current_stock - self.quantity)
 
-        elif self.transaction_type == "BROUGHT_BACK":
-            self.item.current_stock = max(0, self.item.current_stock - self.quantity)
-
-        self.item.save()
-        super().delete(*args, **kwargs)
+            item.save()
+            super().delete(*args, **kwargs)
 
     def __str__(self):
         return f"{self.transaction_type} - {self.item.item_name} ({self.quantity})"

@@ -1,3 +1,4 @@
+from django.db import transaction
 from rest_framework import serializers
 from .models import Item, StockTransaction
 
@@ -39,6 +40,7 @@ def normalize_condition(value):
 
 
 class ItemSerializer(serializers.ModelSerializer):
+    id = serializers.IntegerField(required=False)
     stock_status = serializers.SerializerMethodField()
     inventory_type = serializers.SerializerMethodField()
     stock = serializers.IntegerField(source="current_stock", read_only=True)
@@ -63,6 +65,8 @@ class ItemSerializer(serializers.ModelSerializer):
             "life_span",
             "condition_status",
             "condition_label",
+            "inventory_custodian_slip",
+            "material_receipt",
             "created_at",
             "updated_at",
         ]
@@ -114,6 +118,24 @@ class ItemSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError("Minimum stock cannot be negative.")
         return int(value)
 
+    def validate_id(self, value):
+        if value is None:
+            return value
+        if int(value) <= 0:
+            raise serializers.ValidationError("ID must be a positive integer.")
+        return int(value)
+
+    def validate(self, attrs):
+        category = attrs.get("category", getattr(self.instance, "category", None))
+
+        if category != "EQUIPMENT":
+            attrs["life_span"] = None
+            attrs["condition_status"] = None
+            attrs["inventory_custodian_slip"] = None
+            attrs["material_receipt"] = None
+
+        return attrs
+
     def to_internal_value(self, data):
         data = data.copy()
 
@@ -138,11 +160,20 @@ class ItemSerializer(serializers.ModelSerializer):
         if "lifespan" in data and "life_span" not in data:
             data["life_span"] = data.get("lifespan")
 
-        if data.get("current_stock") in ["", None]:
+        if "inventoryCustodianSlip" in data and "inventory_custodian_slip" not in data:
+            data["inventory_custodian_slip"] = data.get("inventoryCustodianSlip")
+
+        if "materialReceipt" in data and "material_receipt" not in data:
+            data["material_receipt"] = data.get("materialReceipt")
+
+        if "current_stock" in data and data.get("current_stock") in ["", None]:
             data["current_stock"] = 0
 
-        if data.get("min_stock") in ["", None]:
+        if "min_stock" in data and data.get("min_stock") in ["", None]:
             data["min_stock"] = 0
+
+        if "id" in data and data.get("id") in ["", None]:
+            data.pop("id", None)
 
         return super().to_internal_value(data)
 
@@ -228,18 +259,16 @@ class StockTransactionSerializer(serializers.ModelSerializer):
         return normalized
 
     def validate(self, data):
-        transaction_type = data.get("transaction_type")
-        item = data.get("item")
-        quantity = data.get("quantity", 0)
+        transaction_type = data.get(
+            "transaction_type",
+            getattr(self.instance, "transaction_type", None)
+        )
+        item = data.get("item", getattr(self.instance, "item", None))
+        quantity = data.get("quantity", getattr(self.instance, "quantity", 0))
 
         if quantity <= 0:
             raise serializers.ValidationError(
                 {"quantity": "Quantity must be greater than 0."}
-            )
-
-        if transaction_type == "OUT" and item and quantity > item.current_stock:
-            raise serializers.ValidationError(
-                {"quantity": "Not enough stock available."}
             )
 
         if transaction_type == "BROUGHT_BACK" and item and item.category != "EQUIPMENT":
@@ -289,9 +318,84 @@ class StockTransactionSerializer(serializers.ModelSerializer):
         if released_by and not validated_data.get("approved_by"):
             validated_data["approved_by"] = released_by
 
-        return super().create(validated_data)
+        item = validated_data["item"]
+        qty = validated_data["quantity"]
+        tx_type = validated_data["transaction_type"]
+
+        with transaction.atomic():
+            item = Item.objects.select_for_update().get(pk=item.pk)
+
+            if tx_type == "OUT":
+                if item.current_stock < qty:
+                    raise serializers.ValidationError(
+                        {"quantity": f"Not enough stock. Available stock: {item.current_stock}"}
+                    )
+                item.current_stock -= qty
+
+            elif tx_type in ["IN", "BROUGHT_BACK"]:
+                item.current_stock += qty
+
+            item.save()
+
+            transaction_obj = StockTransaction.objects.create(**validated_data)
+
+        return transaction_obj
 
     def update(self, instance, validated_data):
-        raise serializers.ValidationError(
-            {"detail": "Updating transactions is disabled to protect stock integrity."}
-        )
+        notes = validated_data.pop("notes", None)
+        released_by = validated_data.pop("released_by", None)
+        received_by = validated_data.pop("received_by", None)
+
+        if notes is not None and not validated_data.get("remarks"):
+            validated_data["remarks"] = notes
+
+        if received_by and not validated_data.get("supplier"):
+            validated_data["supplier"] = received_by
+
+        if released_by and not validated_data.get("approved_by"):
+            validated_data["approved_by"] = released_by
+
+        new_item = validated_data.get("item", instance.item)
+        new_qty = validated_data.get("quantity", instance.quantity)
+        new_type = validated_data.get("transaction_type", instance.transaction_type)
+
+        with transaction.atomic():
+            old_item = Item.objects.select_for_update().get(pk=instance.item.pk)
+
+            if new_item.pk == old_item.pk:
+                target_item = old_item
+            else:
+                target_item = Item.objects.select_for_update().get(pk=new_item.pk)
+
+            # Reverse old transaction effect
+            if instance.transaction_type == "OUT":
+                old_item.current_stock += instance.quantity
+            elif instance.transaction_type in ["IN", "BROUGHT_BACK"]:
+                if old_item.current_stock < instance.quantity:
+                    raise serializers.ValidationError(
+                        {"detail": "Cannot reverse old transaction because stock would become negative."}
+                    )
+                old_item.current_stock -= instance.quantity
+
+            # Apply new transaction effect
+            if new_type == "OUT":
+                if target_item.current_stock < new_qty:
+                    raise serializers.ValidationError(
+                        {"quantity": f"Not enough stock. Available stock: {target_item.current_stock}"}
+                    )
+                target_item.current_stock -= new_qty
+
+            elif new_type in ["IN", "BROUGHT_BACK"]:
+                target_item.current_stock += new_qty
+
+            old_item.save()
+            if target_item.pk != old_item.pk:
+                target_item.save()
+
+            for attr, value in validated_data.items():
+                setattr(instance, attr, value)
+
+            instance.item = target_item
+            instance.save()
+
+        return instance
